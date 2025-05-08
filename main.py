@@ -145,19 +145,12 @@ def prettyPrint(stats):
 def main():
     parser = argparse.ArgumentParser(prog="slskd-stats", description="Arai's slskd stats calculator")
     parser.add_argument("-f", "--file", help="Name of the file to process", default="./transfers.db")
-    parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("-j", "--json", action="store_true", help="Outputs json instead of plain text")
     parser.add_argument(
         "-r",
         "--rawjson",
         action="store_true",
         help="Outputs raw stats in json. Requires -j flag",
-    )
-    parser.add_argument(
-        "-i",
-        "--indentjson",
-        action="store_true",
-        help="Adds indentation to json output. Requires -j flag",
     )
     args = parser.parse_args()
 
@@ -177,7 +170,7 @@ def main():
     if args.json:
         if not args.rawjson:
             stats = prettifyStats(stats)
-        print(json.dumps(stats, indent=(2 if args.indentjson else 0)))
+        print(json.dumps(stats, indent=2))
         exit(0)
 
     prettyPrint(stats)
