@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-import sqlite3
 import argparse
-from sys import exit
-from pathlib import Path
 import json
+import sqlite3
 from math import floor
+from pathlib import Path
+from sys import exit
 
 sizeUnits = {
     0: "B",
@@ -14,19 +14,60 @@ sizeUnits = {
     4: "TB",
 }
 
+stateFlags = [
+    "None",
+    "Requested",
+    "Queued",
+    "Initializing",
+    "InProgress",
+    "Completed",
+    "Succeeded",
+    "Cancelled",
+    "TimedOut",
+    "Errored",
+    "Rejected",
+    "Aborted",
+    "Locally",
+    "Remotely",
+]
+
+
+def parseState(state: int):
+    flags = []
+    if state == 0:
+        return [stateFlags[0]]
+    offset = 0
+    while state > 0:
+        if state & 1:
+            flags.append(stateFlags[offset + 1])
+        offset += 1
+        state >>= 1
+    return flags
+
+
+def parseOldState(state: str):
+    flags = []
+    state = state.split(", ")
+    for i in stateFlags:
+        if i in state:
+            flags.append(i)
+    return flags
+
 
 def formatSize(bytes: int):
     units = 0
     while bytes >= 1024:
         units += 1
         bytes /= 1024
-    return f"{bytes:.2f} {sizeUnits.get(units, '*2^' + str(units*10))}"
+    return f"{bytes:.2f} {sizeUnits.get(units, '*2^' + str(units * 10))}"
 
 
 def isValidTransfersSqliteDB(db: sqlite3.Connection):
     try:
         cur = db.cursor()
-        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='Transfers' LIMIT 1;")
+        cur.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='Transfers' LIMIT 1;"
+        )
         return bool(cur.fetchall())
     except sqlite3.DatabaseError:
         return False
@@ -36,7 +77,9 @@ def isValidTransfersSqliteDB(db: sqlite3.Connection):
 
 def getTransfers(db: sqlite3.Connection):
     cur = db.cursor()
-    cur.execute("SELECT Username, Direction, Size, State, AverageSpeed, Exception FROM Transfers;")
+    cur.execute(
+        "SELECT Username, Direction, Size, State, AverageSpeed, Exception FROM Transfers;"
+    )
     transfers = cur.fetchall()
     cur.close()
     return transfers
@@ -62,6 +105,13 @@ def calcRawStats(transfers):
         },
         "errors": {},
     }
+
+    if len(transfers) == 0:
+        return totalStats
+
+    if isinstance(transfers[0][3], str):
+        print("warn: You are using an old database format, please update slskd")
+
     for (
         username,
         direction,
@@ -70,13 +120,18 @@ def calcRawStats(transfers):
         speed,
         error,
     ) in transfers:
-        state = state.split(", ")
-        if state[0] != "Completed":
+        if isinstance(state, str):
+            state = parseOldState(state)
+        else:
+            state = parseState(state)
+        if "Completed" not in state:
             continue
-        completed = state[1] == "Succeeded"
-        stats = totalStats["upload"] if direction == "Upload" else totalStats["download"]
+        succeeded = "Succeeded" in state
+        stats = (
+            totalStats["upload"] if direction == "Upload" else totalStats["download"]
+        )
 
-        if completed:
+        if succeeded:
             stats["bytes"] += size
             stats["completed"] += 1
             stats["speedsum"] += speed
@@ -91,8 +146,13 @@ def calcRawStats(transfers):
             if totalStats["errors"].get(shortError) is None:
                 totalStats["errors"][shortError] = 0
             totalStats["errors"][shortError] += 1
-    totalStats["upload"]["speed"] = round(totalStats["upload"]["speedsum"] / totalStats["upload"]["completed"], 2)
-    totalStats["download"]["speed"] = round(totalStats["download"]["speedsum"] / totalStats["download"]["completed"], 2)
+
+    totalStats["upload"]["speed"] = round(
+        totalStats["upload"]["speedsum"] / totalStats["upload"]["completed"], 2
+    )
+    totalStats["download"]["speed"] = round(
+        totalStats["download"]["speedsum"] / totalStats["download"]["completed"], 2
+    )
     return totalStats
 
 
@@ -118,34 +178,45 @@ def prettyPrint(stats):
     stats = prettifyStats(stats)
     print("===== slskd-stats =====")
     print("= Upload =")
-    print(f"Total uploaded:\t{stats['upload']['size']}\t({stats['upload']['completed']} files)")
+    print(
+        f"Total uploaded:\t{stats['upload']['size']}\t({stats['upload']['completed']} files)"
+    )
     print(f"Total failed:\t{stats['upload']['errored']}")
     print(f"Average speed:\t{stats['upload']['speed']}")
     print("Top users:")
+    longestNameLength = len(max(stats["upload"]["users"].keys(), key=len))
     for user, size in stats["upload"]["users"].items():
-        print(f"  {user}:\t{size}")
+        print(f"  {user}:{' ' * (longestNameLength - len(user))} \t {size}")
     if len(stats["download"]["users"]) == 0:
         print("No one has downloaded anything from you yet")
     print("\n= Download =")
-    print(f"Total downloaded:\t{stats['download']['size']}\t({stats['download']['completed']} files)")
+    print(
+        f"Total downloaded:\t{stats['download']['size']}\t({stats['download']['completed']} files)"
+    )
     print(f"Total failed:\t{stats['download']['errored']}")
     print(f"Average speed:\t{stats['download']['speed']}")
     print("Top users:")
     for user, size in stats["download"]["users"].items():
-        print(f"  {user}:\t{size}")
+        print(f"  {user}:{' ' * (longestNameLength - len(user))} \t {size}")
     if len(stats["download"]["users"]) == 0:
         print("You haven't downloaded from anyone yet")
     print("\n= Errors =")
     for error, count in stats["errors"].items():
-        print(f"  {error}:\t{count}")
+        print(f'  "{error}":\t{count}')
     if len(stats["errors"]) == 0:
         print("  No errors")
 
 
 def main():
-    parser = argparse.ArgumentParser(prog="slskd-stats", description="Arai's slskd stats calculator")
-    parser.add_argument("-f", "--file", help="Name of the file to process", default="./transfers.db")
-    parser.add_argument("-j", "--json", action="store_true", help="Outputs json instead of plain text")
+    parser = argparse.ArgumentParser(
+        prog="slskd-stats", description="Arai's slskd stats calculator"
+    )
+    parser.add_argument(
+        "-f", "--file", help="Name of the file to process", default="./transfers.db"
+    )
+    parser.add_argument(
+        "-j", "--json", action="store_true", help="Outputs json instead of plain text"
+    )
     parser.add_argument(
         "-r",
         "--rawjson",
