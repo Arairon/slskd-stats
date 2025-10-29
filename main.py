@@ -89,7 +89,7 @@ def calcRawStats(transfers):
     totalStats = {
         "upload": {
             "bytes": 0,
-            "speed": -1,
+            "speed": 0,
             "speedsum": 0.0,
             "completed": 0,
             "errored": 0,
@@ -97,7 +97,7 @@ def calcRawStats(transfers):
         },
         "download": {
             "bytes": 0,
-            "speed": -1,
+            "speed": 0,
             "speedsum": 0.0,
             "completed": 0,
             "errored": 0,
@@ -147,12 +147,14 @@ def calcRawStats(transfers):
                 totalStats["errors"][shortError] = 0
             totalStats["errors"][shortError] += 1
 
-    totalStats["upload"]["speed"] = round(
-        totalStats["upload"]["speedsum"] / totalStats["upload"]["completed"], 2
-    )
-    totalStats["download"]["speed"] = round(
-        totalStats["download"]["speedsum"] / totalStats["download"]["completed"], 2
-    )
+    if totalStats["upload"]["speedsum"] and totalStats["upload"]["completed"]:
+        totalStats["upload"]["speed"] = round(
+            totalStats["upload"]["speedsum"] / totalStats["upload"]["completed"], 2
+        )
+    if totalStats["download"]["speedsum"] and totalStats["download"]["completed"]:
+        totalStats["download"]["speed"] = round(
+            totalStats["download"]["speedsum"] / totalStats["download"]["completed"], 2
+        )
     return totalStats
 
 
@@ -184,11 +186,15 @@ def prettyPrint(stats):
     print(f"Total failed:\t{stats['upload']['errored']}")
     print(f"Average speed:\t{stats['upload']['speed']}")
     print("Top users:")
-    longestNameLength = len(max(stats["upload"]["users"].keys(), key=len))
+    longestUploadNameLength = (
+        len(max(stats["upload"]["users"].keys(), key=len))
+        if stats["upload"]["users"]
+        else 0
+    )
     for user, size in stats["upload"]["users"].items():
-        print(f"  {user}:{' ' * (longestNameLength - len(user))} \t {size}")
-    if len(stats["download"]["users"]) == 0:
-        print("No one has downloaded anything from you yet")
+        print(f"  {user}:{' ' * (longestUploadNameLength - len(user))} \t {size}")
+    if len(stats["upload"]["users"]) == 0:
+        print("  No one has downloaded anything from you yet")
     print("\n= Download =")
     print(
         f"Total downloaded:\t{stats['download']['size']}\t({stats['download']['completed']} files)"
@@ -196,10 +202,15 @@ def prettyPrint(stats):
     print(f"Total failed:\t{stats['download']['errored']}")
     print(f"Average speed:\t{stats['download']['speed']}")
     print("Top users:")
+    longestDownloadNameLength = (
+        len(max(stats["download"]["users"].keys(), key=len))
+        if stats["download"]["users"]
+        else 0
+    )
     for user, size in stats["download"]["users"].items():
-        print(f"  {user}:{' ' * (longestNameLength - len(user))} \t {size}")
+        print(f"  {user}:{' ' * (longestDownloadNameLength - len(user))} \t {size}")
     if len(stats["download"]["users"]) == 0:
-        print("You haven't downloaded from anyone yet")
+        print("  You haven't downloaded from anyone yet")
     print("\n= Errors =")
     for error, count in stats["errors"].items():
         print(f'  "{error}":\t{count}')
