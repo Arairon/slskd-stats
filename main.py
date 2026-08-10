@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import shutil
 import sqlite3
+import tempfile
+from contextlib import contextmanager
 from math import floor
 from pathlib import Path
-from sys import exit
+from sys import exit, stderr
+from urllib.parse import quote
 
 sizeUnits = {
     0: "B",
@@ -83,6 +87,56 @@ def getTransfers(db: sqlite3.Connection):
     transfers = cur.fetchall()
     cur.close()
     return transfers
+
+
+@contextmanager
+def openTransfersDB(dbFile: Path):
+    """Open a transfers.db read-only, even while slskd is running.
+
+    Preferred path is sqlite's read-only URI mode, which can also read a -wal
+    it has no write access to (as long as the -shm is readable). If that fails
+    -- e.g. no -shm because no writer is attached, or a filesystem sqlite won't
+    lock over -- fall back to snapshotting the db + sidecars to a temp dir and
+    reading the copy, so the -wal still gets replayed.
+    """
+    db = None
+    reason = None
+    try:
+        db = sqlite3.connect(f"file:{quote(str(dbFile))}?mode=ro", uri=True)
+        db.execute("SELECT count(*) FROM sqlite_master;").fetchone()
+    except sqlite3.OperationalError as err:
+        # A hot -wal we have no write access to lands here (slskd is running,
+        # or the files belong to root); fall through to the snapshot.
+        if db is not None:
+            db.close()
+        db = None
+        reason = err
+    except sqlite3.DatabaseError:
+        pass  # not a database at all, let the caller's validity check say so
+
+    if db is not None:
+        try:
+            yield db
+        finally:
+            db.close()
+        return
+
+    print(
+        f"note: reading a snapshot copy, direct read-only open failed ({reason})",
+        file=stderr,
+    )
+    with tempfile.TemporaryDirectory(prefix="slskd-stats-") as tmp:
+        copy = Path(tmp) / "transfers.db"
+        shutil.copy2(dbFile, copy)
+        for suffix in ("-wal", "-shm"):
+            sidecar = dbFile.with_name(dbFile.name + suffix)
+            if sidecar.exists():
+                shutil.copy2(sidecar, copy.with_name(copy.name + suffix))
+        db = sqlite3.connect(copy)
+        try:
+            yield db
+        finally:
+            db.close()
 
 
 def calcRawStats(transfers):
@@ -240,14 +294,15 @@ def main():
     if not dbFile.exists() or not dbFile.is_file():
         print(f"Target: {dbFile.resolve()} is not a valid file")
         exit(1)
-    db = sqlite3.connect(dbFile.resolve())
-    if not isValidTransfersSqliteDB(db):
-        print(
-            f"File: {dbFile.resolve()} is either not a valid sqlite3 database or does not contain the 'Transfers' table."
-        )
-        exit(1)
 
-    transfers = getTransfers(db)
+    with openTransfersDB(dbFile.resolve()) as db:
+        if not isValidTransfersSqliteDB(db):
+            print(
+                f"File: {dbFile.resolve()} is either not a valid sqlite3 database or does not contain the 'Transfers' table."
+            )
+            exit(1)
+        transfers = getTransfers(db)
+
     stats = calcRawStats(transfers)
     if args.json:
         if not args.rawjson:

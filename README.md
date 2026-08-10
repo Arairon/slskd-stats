@@ -12,6 +12,7 @@ Thanks [Player6734](https://github.com/Player6734/slskd-stats) for the inspirati
 - Lists the top users by data transferred.
 - Reports common errors encountered during transfers.
 - Outputs stats in plain text or JSON format.
+- Reads a live `transfers.db` in place, without stopping slskd.
 
 ## Requirements
 
@@ -22,6 +23,21 @@ Thanks [Player6734](https://github.com/Player6734/slskd-stats) for the inspirati
 1. Download the script
 2. Get the transfers.db file (typically located at `/app/data/transfers.db` in the slskd container. If you do not have the /app directory mounted, then you can use `docker cp <container_id>:/app/data/transfers.db ./transfers.db` to copy the file directly from the container)
 3. Run the script. The script will attempt to open a `./transfers.db` file. You can change the desired file with the `-f path/to/file` flag. (You can also use `-j` to get json instead of plain text and `-r` to get raw info)
+
+### Reading a live database
+
+You can point `-f` straight at the database slskd is using, e.g. a bind mount or
+an NFS/SMB share of the container's data directory - the file is never written to:
+
+```sh
+./main.py -f /path/to/slskd/data/transfers.db
+```
+
+The database is opened read-only. If sqlite refuses that (a running slskd leaves a
+hot `transfers.db-wal`, which sqlite may need to write to before it can read it, and
+the files are usually owned by root), the script copies `transfers.db` and its `-wal`
+/ `-shm` sidecars to a temporary directory and reads the copy instead, so recent
+transfers still show up. It prints a `note:` to stderr when it does this.
 
 ## Output example
 
