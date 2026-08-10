@@ -81,8 +81,18 @@ def isValidTransfersSqliteDB(db: sqlite3.Connection):
 
 def getTransfers(db: sqlite3.Connection):
     cur = db.cursor()
+    cur.execute("PRAGMA table_info(Transfers);")
+    columns = {row[1] for row in cur.fetchall()}
+    # Older schemas may not have Filename; the per-file stats are simply left
+    # empty in that case rather than failing the whole run.
+    filename = "Filename" if "Filename" in columns else "NULL"
+    if filename == "NULL":
+        print(
+            "warn: no Filename column in this database, per-file stats unavailable",
+            file=stderr,
+        )
     cur.execute(
-        "SELECT Username, Direction, Size, State, AverageSpeed, Exception FROM Transfers;"
+        f"SELECT Username, Direction, Size, State, AverageSpeed, Exception, {filename} FROM Transfers;"
     )
     transfers = cur.fetchall()
     cur.close()
@@ -139,24 +149,44 @@ def openTransfersDB(dbFile: Path):
             db.close()
 
 
+def splitPath(filename: str):
+    """Soulseek paths use backslashes; return (folder, basename, extension)."""
+    path = filename.replace("/", "\\")
+    folder, _, base = path.rpartition("\\")
+    ext = base.rpartition(".")[2].lower() if "." in base else "(none)"
+    if len(ext) > 8 or not ext.isalnum():
+        ext = "(none)"
+    return (folder, base, ext)
+
+
+def bump(bucket: dict, key: str, size: int):
+    entry = bucket.get(key)
+    if entry is None:
+        entry = bucket[key] = {"count": 0, "bytes": 0}
+    entry["count"] += 1
+    entry["bytes"] += size
+
+
+def emptyDirectionStats():
+    return {
+        "bytes": 0,
+        "speed": 0,
+        "speedsum": 0.0,
+        "completed": 0,
+        "errored": 0,
+        "uniqueUsers": 0,
+        "uniqueFiles": 0,
+        "users": {},
+        "files": {},
+        "folders": {},
+        "formats": {},
+    }
+
+
 def calcRawStats(transfers):
     totalStats = {
-        "upload": {
-            "bytes": 0,
-            "speed": 0,
-            "speedsum": 0.0,
-            "completed": 0,
-            "errored": 0,
-            "users": {},
-        },
-        "download": {
-            "bytes": 0,
-            "speed": 0,
-            "speedsum": 0.0,
-            "completed": 0,
-            "errored": 0,
-            "users": {},
-        },
+        "upload": emptyDirectionStats(),
+        "download": emptyDirectionStats(),
         "errors": {},
     }
 
@@ -173,6 +203,7 @@ def calcRawStats(transfers):
         state,
         speed,
         error,
+        filename,
     ) in transfers:
         if isinstance(state, str):
             state = parseOldState(state)
@@ -192,6 +223,11 @@ def calcRawStats(transfers):
             if stats["users"].get(username) is None:
                 stats["users"][username] = 0
             stats["users"][username] += size
+            if filename:
+                folder, _, ext = splitPath(filename)
+                bump(stats["files"], filename, size)
+                bump(stats["folders"], folder or "(root)", size)
+                bump(stats["formats"], ext, size)
         else:
             stats["errored"] += 1
             shortError = " ".join(error.split(" ")[:4]).strip(" .")
@@ -201,70 +237,109 @@ def calcRawStats(transfers):
                 totalStats["errors"][shortError] = 0
             totalStats["errors"][shortError] += 1
 
-    if totalStats["upload"]["speedsum"] and totalStats["upload"]["completed"]:
-        totalStats["upload"]["speed"] = round(
-            totalStats["upload"]["speedsum"] / totalStats["upload"]["completed"], 2
-        )
-    if totalStats["download"]["speedsum"] and totalStats["download"]["completed"]:
-        totalStats["download"]["speed"] = round(
-            totalStats["download"]["speedsum"] / totalStats["download"]["completed"], 2
-        )
+    for direction in ("upload", "download"):
+        stats = totalStats[direction]
+        if stats["speedsum"] and stats["completed"]:
+            stats["speed"] = round(stats["speedsum"] / stats["completed"], 2)
+        stats["uniqueUsers"] = len(stats["users"])
+        stats["uniqueFiles"] = len(stats["files"])
     return totalStats
 
 
-def prettifyStatsDirection(stats):
+def topEntries(bucket: dict, top: int, key="count"):
+    """Sort a {name: {count, bytes}} bucket, returning a list of pretty rows."""
+    ranked = sorted(
+        bucket.items(), key=lambda i: (i[1][key], i[1]["bytes"]), reverse=True
+    )[:top]
+    return [
+        {"name": name, "count": v["count"], "size": formatSize(v["bytes"])}
+        for name, v in ranked
+    ]
+
+
+def prettifyStatsDirection(stats, top=5):
     stats["size"] = formatSize(stats["bytes"])
     del stats["bytes"]
     stats["speed"] = formatSize(floor(stats["speed"])) + "/s"
     del stats["speedsum"]
-    usertop = sorted(stats["users"].items(), key=lambda i: i[1], reverse=True)[:5]
+    usertop = sorted(stats["users"].items(), key=lambda i: i[1], reverse=True)[:top]
     stats["users"] = {k: formatSize(v) for k, v in usertop}
+    stats["files"] = topEntries(stats["files"], top)
+    stats["folders"] = topEntries(stats["folders"], top)
+    stats["formats"] = topEntries(stats["formats"], top, key="bytes")
     return stats
 
 
-def prettifyStats(stats):
-    stats["upload"] = prettifyStatsDirection(stats["upload"])
-    stats["download"] = prettifyStatsDirection(stats["download"])
-    errortop = sorted(stats["errors"].items(), key=lambda i: i[1], reverse=True)[:5]
+def prettifyStats(stats, top=5):
+    stats["upload"] = prettifyStatsDirection(stats["upload"], top)
+    stats["download"] = prettifyStatsDirection(stats["download"], top)
+    errortop = sorted(stats["errors"].items(), key=lambda i: i[1], reverse=True)[:top]
     stats["errors"] = dict(errortop)
     return stats
 
 
-def prettyPrint(stats):
-    stats = prettifyStats(stats)
+def elide(text: str, width: int):
+    """Trim from the left; the tail of a path is the informative half."""
+    if width <= 1 or len(text) <= width:
+        return text
+    return "..." + text[-(width - 3) :]
+
+
+def shortenFilePath(path: str):
+    """Keep the last two path components, e.g. 'Album\\01 - Track.flac'."""
+    parts = path.replace("/", "\\").split("\\")
+    return "\\".join(parts[-2:])
+
+
+def printRanked(rows, empty: str, width: int):
+    if not rows:
+        print(f"  {empty}")
+        return
+    countWidth = max(len(str(row["count"])) for row in rows)
+    sizeWidth = max(len(row["size"]) for row in rows)
+    nameWidth = max(24, width - (countWidth + sizeWidth + 9))
+    for row in rows:
+        name = elide(row["name"], nameWidth)
+        print(f"  {row['count']:>{countWidth}} x {row['size']:>{sizeWidth}}  {name}")
+
+
+def printDirection(stats, direction: str, width: int):
+    isUpload = direction == "upload"
+    print(f"= {'Upload' if isUpload else 'Download'} =")
+    print(
+        f"Total {'uploaded' if isUpload else 'downloaded'}:\t{stats['size']}"
+        f"\t({stats['completed']} files)"
+    )
+    print(f"Total failed:\t{stats['errored']}")
+    print(f"Average speed:\t{stats['speed']}")
+    print(f"Unique files:\t{stats['uniqueFiles']}")
+    print(f"Unique users:\t{stats['uniqueUsers']}")
+    print("Top users:")
+    longestNameLength = len(max(stats["users"].keys(), key=len)) if stats["users"] else 0
+    for user, size in stats["users"].items():
+        print(f"  {user}:{' ' * (longestNameLength - len(user))} \t {size}")
+    if len(stats["users"]) == 0:
+        print(
+            "  No one has downloaded anything from you yet"
+            if isUpload
+            else "  You haven't downloaded from anyone yet"
+        )
+    print("Top files:")
+    files = [dict(row, name=shortenFilePath(row["name"])) for row in stats["files"]]
+    printRanked(files, "No files yet", width)
+    print("Top folders:")
+    printRanked(stats["folders"], "No folders yet", width)
+    print("Top formats:")
+    printRanked(stats["formats"], "No formats yet", width)
+
+
+def prettyPrint(stats, top=5):
+    stats = prettifyStats(stats, top)
+    width = shutil.get_terminal_size((100, 24)).columns
     print("===== slskd-stats =====")
-    print("= Upload =")
-    print(
-        f"Total uploaded:\t{stats['upload']['size']}\t({stats['upload']['completed']} files)"
-    )
-    print(f"Total failed:\t{stats['upload']['errored']}")
-    print(f"Average speed:\t{stats['upload']['speed']}")
-    print("Top users:")
-    longestUploadNameLength = (
-        len(max(stats["upload"]["users"].keys(), key=len))
-        if stats["upload"]["users"]
-        else 0
-    )
-    for user, size in stats["upload"]["users"].items():
-        print(f"  {user}:{' ' * (longestUploadNameLength - len(user))} \t {size}")
-    if len(stats["upload"]["users"]) == 0:
-        print("  No one has downloaded anything from you yet")
-    print("\n= Download =")
-    print(
-        f"Total downloaded:\t{stats['download']['size']}\t({stats['download']['completed']} files)"
-    )
-    print(f"Total failed:\t{stats['download']['errored']}")
-    print(f"Average speed:\t{stats['download']['speed']}")
-    print("Top users:")
-    longestDownloadNameLength = (
-        len(max(stats["download"]["users"].keys(), key=len))
-        if stats["download"]["users"]
-        else 0
-    )
-    for user, size in stats["download"]["users"].items():
-        print(f"  {user}:{' ' * (longestDownloadNameLength - len(user))} \t {size}")
-    if len(stats["download"]["users"]) == 0:
-        print("  You haven't downloaded from anyone yet")
+    printDirection(stats["upload"], "upload", width)
+    print()
+    printDirection(stats["download"], "download", width)
     print("\n= Errors =")
     for error, count in stats["errors"].items():
         print(f'  "{error}":\t{count}')
@@ -288,6 +363,13 @@ def main():
         action="store_true",
         help="Outputs raw stats in json. Requires -j flag",
     )
+    parser.add_argument(
+        "-n",
+        "--top",
+        type=int,
+        default=5,
+        help="How many entries to show in each top list (default: 5)",
+    )
     args = parser.parse_args()
 
     dbFile = Path(args.file)
@@ -306,11 +388,11 @@ def main():
     stats = calcRawStats(transfers)
     if args.json:
         if not args.rawjson:
-            stats = prettifyStats(stats)
+            stats = prettifyStats(stats, args.top)
         print(json.dumps(stats, indent=2))
         exit(0)
 
-    prettyPrint(stats)
+    prettyPrint(stats, args.top)
 
 
 if __name__ == "__main__":
