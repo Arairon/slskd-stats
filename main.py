@@ -151,8 +151,8 @@ def openTransfersDB(dbFile: Path):
 
 def splitPath(filename: str):
     """Soulseek paths use backslashes; return (folder, basename, extension)."""
-    path = filename.replace("/", "\\")
-    folder, _, base = path.rpartition("\\")
+    path = filename.replace("\\", "/")
+    folder, _, base = path.rpartition("/")
     ext = base.rpartition(".")[2].lower() if "." in base else "(none)"
     if len(ext) > 8 or not ext.isalnum():
         ext = "(none)"
@@ -286,9 +286,9 @@ def elide(text: str, width: int):
 
 
 def shortenFilePath(path: str):
-    """Keep the last two path components, e.g. 'Album\\01 - Track.flac'."""
-    parts = path.replace("/", "\\").split("\\")
-    return "\\".join(parts[-2:])
+    """Keep the last two path components, e.g. 'Album/01 - Track.flac'."""
+    parts = path.replace("\\", "/").split("/")
+    return "/".join(parts[-2:])
 
 
 def printRanked(rows, empty: str, width: int):
